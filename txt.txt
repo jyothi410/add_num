@@ -1,0 +1,239 @@
+import pandas as pd
+
+def process_excel_to_markdown(
+    path,
+    max_rows_to_check=20,
+    string_fraction_threshold=0.6,
+    output_file=None
+):
+    """
+    Process an Excel file with multiple sheets, auto-detect headers, 
+    and convert to markdown format.
+    
+    Parameters
+    ----------
+    path : str
+        Path to the Excel file.
+    max_rows_to_check : int, default 20
+        How many top rows to scan when searching for a header.
+    string_fraction_threshold : float, default 0.6
+        Minimum fraction of non-empty cells in a row that must be strings 
+        (in a string-coerced preview) to consider that row a header.
+    output_file : str, optional
+        Path to save the markdown output. If None, returns the markdown string.
+    
+    Returns
+    -------
+    markdown_content : str
+        Complete markdown content for all sheets.
+    sheet_info : list
+        List of dictionaries containing processing info for each sheet.
+    """
+    
+    # Get all sheet names
+    excel_file = pd.ExcelFile(path)
+    sheet_names = excel_file.sheet_names
+    
+    markdown_content = ""
+    sheet_info = []
+    
+    # Iterate through all sheets
+    for sheet_name in sheet_names:
+        print(f"Processing sheet: {sheet_name}")
+        
+        try:
+            # Process individual sheet
+            df, header_row, cleaned_df = auto_read_excel_with_header(
+                path=path,
+                sheet_name=sheet_name,
+                max_rows_to_check=max_rows_to_check,
+                string_fraction_threshold=string_fraction_threshold
+            )
+            
+            # Add sheet information
+            sheet_info.append({
+                'sheet_name': sheet_name,
+                'header_row': header_row,
+                'original_rows': len(df),
+                'cleaned_rows': len(cleaned_df),
+                'columns': list(cleaned_df.columns)
+            })
+            
+            # Convert to markdown
+            sheet_markdown = convert_sheet_to_markdown(cleaned_df, sheet_name)
+            markdown_content += sheet_markdown + "\n\n"
+            
+        except Exception as e:
+            print(f"Error processing sheet '{sheet_name}': {str(e)}")
+            sheet_info.append({
+                'sheet_name': sheet_name,
+                'error': str(e)
+            })
+            continue
+    
+    # Save to file if specified
+    if output_file:
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(markdown_content)
+        print(f"Markdown saved to: {output_file}")
+    
+    return markdown_content, sheet_info
+
+def auto_read_excel_with_header(
+    path,
+    sheet_name=0,
+    max_rows_to_check=20,
+    string_fraction_threshold=0.6,
+):
+    """
+    Read an Excel sheet, auto-detect the header row, and clean the data.
+    
+    Parameters
+    ----------
+    path : str
+        Path to the Excel file.
+    sheet_name : int or str, default 0
+        Sheet index or name.
+    max_rows_to_check : int, default 20
+        How many top rows to scan when searching for a header.
+    string_fraction_threshold : float, default 0.6
+        Minimum fraction of non-empty cells in a row that must be strings 
+        (in a string-coerced preview) to consider that row a header.
+    
+    Returns
+    -------
+    df : pandas.DataFrame
+        Original DataFrame with detected header applied.
+    header_row : int
+        Zero-based index of the detected header row.
+    cleaned_df : pandas.DataFrame
+        DataFrame with empty rows removed.
+    """
+    
+    # 1) Preview a small portion as all strings to make header detection easier
+    preview = pd.read_excel(
+        path,
+        sheet_name=sheet_name,
+        header=None,
+        nrows=max_rows_to_check,
+        dtype=str
+    )
+    
+    header_row = None
+    
+    for i, row in preview.iterrows():
+        # Cells that are not NaN/empty strings
+        non_empty = row.dropna().astype(str).str.strip()
+        non_empty = non_empty[non_empty != ""]
+        
+        if len(non_empty) == 0:
+            continue
+        
+        # Fraction of cells that are "string-like" 
+        string_fraction = len(non_empty) / len(row)
+        
+        if string_fraction >= string_fraction_threshold:
+            header_row = i
+            break
+    
+    if header_row is None:
+        raise ValueError("No likely header row detected in the first "
+                         f"{max_rows_to_check} rows.")
+    
+    # 2) Re-read the sheet with the detected header row (to preserve dtypes)
+    df = pd.read_excel(path, sheet_name=sheet_name, header=header_row)
+    
+    # 3) Remove empty rows below the header
+    cleaned_df = remove_empty_rows(df)
+    
+    return df, header_row, cleaned_df
+
+def remove_empty_rows(df):
+    """
+    Remove rows that are completely empty or contain only NaN/whitespace.
+    
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input DataFrame.
+    
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with empty rows removed.
+    """
+    # Create a copy to avoid modifying the original
+    cleaned_df = df.copy()
+    
+    # Convert to string and strip whitespace for checking
+    string_df = cleaned_df.astype(str).apply(lambda x: x.str.strip())
+    
+    # Identify rows where all values are NaN, empty string, or 'nan'
+    empty_mask = (
+        string_df.isnull().all(axis=1) |  # All NaN
+        (string_df == '').all(axis=1) |   # All empty strings
+        (string_df == 'nan').all(axis=1)  # All 'nan' strings
+    )
+    
+    # Remove empty rows
+    cleaned_df = cleaned_df[~empty_mask].reset_index(drop=True)
+    
+    return cleaned_df
+
+def convert_sheet_to_markdown(df, sheet_name):
+    """
+    Convert a DataFrame to markdown format with sheet name as header.
+    
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame to convert.
+    sheet_name : str
+        Name of the sheet for the header.
+    
+    Returns
+    -------
+    str
+        Markdown formatted string.
+    """
+    if df.empty:
+        return f"## {sheet_name}\n\n*No data found in this sheet.*\n"
+    
+    markdown = f"## {sheet_name}\n\n"
+    
+    # Convert DataFrame to markdown table
+    markdown += df.to_markdown(index=False, tablefmt='github')
+    
+    return markdown
+
+# Example usage
+if __name__ == "__main__":
+    # Process all sheets in an Excel file
+    excel_path = "your_file.xlsx"
+    
+    try:
+        markdown_content, sheet_info = process_excel_to_markdown(
+            path=excel_path,
+            output_file="output.md"
+        )
+        
+        # Print summary information
+        print("\nProcessing Summary:")
+        print("-" * 50)
+        for info in sheet_info:
+            if 'error' in info:
+                print(f"Sheet '{info['sheet_name']}': ERROR - {info['error']}")
+            else:
+                print(f"Sheet '{info['sheet_name']}':")
+                print(f"  - Header found at row: {info['header_row']}")
+                print(f"  - Original rows: {info['original_rows']}")
+                print(f"  - Cleaned rows: {info['cleaned_rows']}")
+                print(f"  - Columns: {len(info['columns'])}")
+        
+        print(f"\nMarkdown content generated successfully!")
+        print(f"Total sheets processed: {len([s for s in sheet_info if 'error' not in s])}")
+        print(f"Sheets with errors: {len([s for s in sheet_info if 'error' in s])}")
+        
+    except Exception as e:
+        print(f"Error processing Excel file: {str(e)}")
+ 
